@@ -83,52 +83,8 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "SONIVOX did not return an audio URL.", requestId }, { status: 502 });
     }
 
-    // Fetch the signed media server-side and stream the bytes from this same-origin route.
-    // This avoids mobile-browser CORS, storage-host and signed-URL playback failures.
-    let mediaUrl: URL;
-    try {
-      mediaUrl = new URL(audioUrl);
-      if (mediaUrl.protocol !== "https:" || mediaUrl.username || mediaUrl.password) {
-        throw new Error("Invalid media URL");
-      }
-    } catch {
-      logSafe({ requestId, stage: "invalid_audio_url", endpoint: endpoint.origin + endpoint.pathname, status: 502, durationMs: Date.now() - startedAt });
-      return NextResponse.json({ error: "SONIVOX returned an invalid audio URL.", requestId }, { status: 502 });
-    }
-
-    const media = await fetch(mediaUrl, {
-      method: "GET",
-      cache: "no-store",
-      signal: controller.signal,
-      headers: { Accept: "audio/*, application/octet-stream" },
-    });
-    if (!media.ok) {
-      logSafe({ requestId, stage: "audio_download_failed", endpoint: mediaUrl.origin, status: media.status, durationMs: Date.now() - startedAt });
-      return NextResponse.json({ error: `SONIVOX audio download failed (HTTP ${media.status}).`, requestId }, { status: 502 });
-    }
-
-    const contentType = media.headers.get("content-type") || "audio/wav";
-    if (!contentType.toLowerCase().startsWith("audio/") && !contentType.toLowerCase().includes("octet-stream")) {
-      logSafe({ requestId, stage: "invalid_audio_content_type", endpoint: mediaUrl.origin, status: 502, durationMs: Date.now() - startedAt });
-      return NextResponse.json({ error: "SONIVOX returned a non-audio file.", requestId }, { status: 502 });
-    }
-
-    const audioBytes = await media.arrayBuffer();
-    if (!audioBytes.byteLength) {
-      logSafe({ requestId, stage: "empty_audio", endpoint: mediaUrl.origin, status: 502, durationMs: Date.now() - startedAt });
-      return NextResponse.json({ error: "SONIVOX returned an empty audio file.", requestId }, { status: 502 });
-    }
-
-    logSafe({ requestId, stage: "complete", endpoint: endpoint.origin + endpoint.pathname, status: 200, audioBytes: audioBytes.byteLength, durationMs: Date.now() - startedAt });
-    return new Response(audioBytes, {
-      status: 200,
-      headers: {
-        "Content-Type": contentType,
-        "Content-Length": String(audioBytes.byteLength),
-        "Cache-Control": "no-store, no-cache, must-revalidate",
-        "X-SONIVOX-Request-Id": requestId,
-      },
-    });
+    logSafe({ requestId, stage: "complete", endpoint: endpoint.origin + endpoint.pathname, status: 200, durationMs: Date.now() - startedAt });
+    return NextResponse.json({ audioUrl, requestId });
   } catch {
     if (request.signal.aborted) {
       logSafe({ requestId, stage: "client_cancelled", durationMs: Date.now() - startedAt });
