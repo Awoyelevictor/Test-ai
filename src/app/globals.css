@@ -82,3 +82,6 @@ h1 em{font-style:normal;background:linear-gradient(95deg,#79c8ff,#a6a0ff 65%,#85
 @keyframes blink{0%,80%,100%{opacity:.3}40%{opacity:1}}
 @media(max-width:640px){.shell{padding:0 19px}.topbar{height:70px}.service-pill{font-size:8px;padding:7px 9px}.workspace{padding:43px 0 50px}h1{font-size:46px}.intro{font-size:12px;max-width:300px;margin:0 auto;line-height:1.6}.orb-stage{height:265px}.voice-orb{width:148px;height:148px}.halo-one{width:198px;height:198px}.halo-two{width:240px;height:240px}.service-row{gap:12px;padding:13px 10px}.service-item{font-size:8px;gap:6px}.service-item b{font-size:7px}.text-mode-toggle span{font-size:7px}.footer{font-size:7px;letter-spacing:.1em}}
 @media(prefers-reduced-motion:reduce){*,*:before,*:after{animation-duration:.01ms!important;animation-iteration-count:1!important;scroll-behavior:auto!important}}
+
+.audio-retry{display:block;margin:12px auto 0;border:1px solid rgba(123,228,237,.35);background:rgba(36,78,104,.35);color:#c8f4f4;border-radius:10px;padding:10px 16px;font-size:12px}
+.audio-retry:focus-visible{outline:2px solid var(--cyan);outline-offset:3px}
