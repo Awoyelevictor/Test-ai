@@ -237,18 +237,25 @@ export default function Home() {
           signal: controller.signal,
           cache: "no-store",
         });
-        const data = await response.json().catch(() => ({}));
-        if (!response.ok) throw new Error(data.error || `Speech request failed (HTTP ${response.status}).`);
-        const returnedAudioUrl: unknown = data.audioUrl;
-        if (typeof returnedAudioUrl !== "string" || !returnedAudioUrl) {
-          throw new Error("SONIVOX did not return an audio URL.");
+        if (!response.ok) {
+          const data = await response.json().catch(() => ({}));
+          throw new Error(data.error || `Speech request failed (HTTP ${response.status}).`);
         }
-        audioUrl = returnedAudioUrl;
-        await playAudioUrl(returnedAudioUrl, controller.signal);
+        const audioBlob = await response.blob();
+        if (!audioBlob.size || !audioBlob.type.toLowerCase().startsWith("audio/")) {
+          throw new Error("SONIVOX returned an empty or unsupported audio file.");
+        }
+        audioUrl = URL.createObjectURL(audioBlob);
+        await playAudioUrl(audioUrl, controller.signal);
+        URL.revokeObjectURL(audioUrl);
+        audioUrl = undefined;
         setRetryChunk(null);
         setAudioNeedsGesture(false);
       } catch (error) {
-        if (error instanceof DOMException && error.name === "AbortError") return;
+        if (error instanceof DOMException && error.name === "AbortError") {
+          if (audioUrl) URL.revokeObjectURL(audioUrl);
+          return;
+        }
         const reason = error instanceof Error ? error.message : "Speech playback failed.";
         setRetryChunk({ ...task, index, audioUrl });
         const blocked = error instanceof DOMException && error.name === "NotAllowedError";
@@ -275,6 +282,7 @@ export default function Home() {
       try {
         // Invoked directly by the user's tap for mobile autoplay compatibility.
         await playAudioUrl(task.audioUrl, controller.signal);
+        URL.revokeObjectURL(task.audioUrl);
         setRetryChunk(null);
         setAudioNeedsGesture(false);
         await runSpeech(task, task.index + 1);
