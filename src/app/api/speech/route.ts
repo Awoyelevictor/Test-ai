@@ -70,19 +70,19 @@ export async function POST(request: NextRequest) {
 
     const result = await upstream.json().catch(() => ({}));
     if (!upstream.ok) {
-      logSafe({ requestId, stage: "upstream_response", status: upstream.status, durationMs: Date.now() - startedAt });
-      const detail = result?.detail || result?.error || result?.message;
-      const message = typeof detail === "string" && detail.length <= 200 ? detail : `SONIVOX returned HTTP ${upstream.status}.`;
+      logSafe({ requestId, stage: "upstream_response", endpoint: endpoint.origin + endpoint.pathname, status: upstream.status, durationMs: Date.now() - startedAt });
+      // Do not forward arbitrary upstream response bodies; they may contain sensitive diagnostics.
+      const message = `SONIVOX returned HTTP ${upstream.status}.`;
       return NextResponse.json({ error: message, requestId }, { status: upstream.status });
     }
 
     const audioUrl = result?.audio_url || result?.audioUrl || result?.url;
     if (typeof audioUrl !== "string" || !audioUrl) {
-      logSafe({ requestId, stage: "missing_audio_url", status: 502, durationMs: Date.now() - startedAt });
+      logSafe({ requestId, stage: "missing_audio_url", endpoint: endpoint.origin + endpoint.pathname, status: 502, durationMs: Date.now() - startedAt });
       return NextResponse.json({ error: "SONIVOX did not return an audio URL.", requestId }, { status: 502 });
     }
 
-    logSafe({ requestId, stage: "complete", status: 200, durationMs: Date.now() - startedAt });
+    logSafe({ requestId, stage: "complete", endpoint: endpoint.origin + endpoint.pathname, status: 200, durationMs: Date.now() - startedAt });
     return NextResponse.json({ audioUrl, requestId });
   } catch {
     if (request.signal.aborted) {
@@ -90,10 +90,10 @@ export async function POST(request: NextRequest) {
       return new Response(null, { status: 499 });
     }
     if (timedOut) {
-      logSafe({ requestId, stage: "upstream_timeout", status: 504, durationMs: Date.now() - startedAt });
+      logSafe({ requestId, stage: "upstream_timeout", endpoint: endpoint.origin + endpoint.pathname, status: 504, durationMs: Date.now() - startedAt });
       return NextResponse.json({ error: "SONIVOX request timed out. Retry this audio chunk.", requestId }, { status: 504 });
     }
-    logSafe({ requestId, stage: "upstream_network_error", status: 502, durationMs: Date.now() - startedAt });
+    logSafe({ requestId, stage: "upstream_network_error", endpoint: endpoint.origin + endpoint.pathname, status: 502, durationMs: Date.now() - startedAt });
     return NextResponse.json({ error: "Could not reach SONIVOX. Retry this audio chunk.", requestId }, { status: 502 });
   } finally {
     clearTimeout(timeout);
