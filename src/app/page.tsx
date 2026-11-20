@@ -239,11 +239,12 @@ export default function Home() {
         });
         const data = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(data.error || `Speech request failed (HTTP ${response.status}).`);
-        if (typeof data.audioUrl !== "string" || !data.audioUrl) {
+        const returnedAudioUrl: unknown = data.audioUrl;
+        if (typeof returnedAudioUrl !== "string" || !returnedAudioUrl) {
           throw new Error("SONIVOX did not return an audio URL.");
         }
-        audioUrl = data.audioUrl;
-        await playAudioUrl(audioUrl, controller.signal);
+        audioUrl = returnedAudioUrl;
+        await playAudioUrl(returnedAudioUrl, controller.signal);
         setRetryChunk(null);
         setAudioNeedsGesture(false);
       } catch (error) {
