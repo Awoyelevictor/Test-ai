@@ -4,7 +4,8 @@ export const runtime = "nodejs";
 export const maxDuration = 60;
 
 const LANGUAGES = new Set(["eng", "yor", "hau", "ibo", "ful"]);
-const UPSTREAM_TIMEOUT_MS = 25_000;
+// Vercel route maxDuration is 60s; reserve ~5s for response serialization and cleanup.
+const UPSTREAM_TIMEOUT_MS = 55_000;
 
 function logSafe(event: Record<string, string | number>) {
   // Never log credentials, message text, raw upstream bodies, or signed audio URLs.
