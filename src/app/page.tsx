@@ -116,7 +116,7 @@ export default function Home() {
     const response = await fetch("/api/speech", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text, lang: "en" }),
+      body: JSON.stringify({ text, lang: "eng" }),
     });
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || "Speech generation failed.");
