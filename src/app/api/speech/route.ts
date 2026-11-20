@@ -15,9 +15,15 @@ export async function POST(request: NextRequest) {
   catch { return NextResponse.json({ error: "Invalid request body." }, { status: 400 }); }
 
   const text = typeof body.text === "string" ? body.text.trim() : "";
-  const lang = typeof body.lang === "string" ? body.lang : "en";
+  const supportedLanguages = new Set(["eng", "yor", "hau", "ibo", "ful"]);
+  const requestedLanguage = typeof body.lang === "string" ? body.lang.trim().toLowerCase() : "eng";
+  const lang = requestedLanguage === "en" ? "eng" : requestedLanguage;
+
   if (!text) return NextResponse.json({ error: "Text is required for speech generation." }, { status: 400 });
-  if (text.length > 2000) return NextResponse.json({ error: "Speech text is limited to 2,000 characters." }, { status: 413 });
+  if (text.length > 1000) return NextResponse.json({ error: "Sonivox allows up to 1,000 characters per speech request." }, { status: 413 });
+  if (!supportedLanguages.has(lang)) {
+    return NextResponse.json({ error: "Unsupported language. Use eng, yor, hau, ibo or ful." }, { status: 400 });
+  }
 
   try {
     const endpoint = `${baseUrl.replace(/\/$/, "")}/v1/speech`;
