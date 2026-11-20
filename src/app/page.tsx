@@ -2,6 +2,55 @@
 
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 
+type SpeechChunk = { id: string; index: number; text: string };
+
+// SONIVOX currently validates JavaScript string.length (UTF-16 code units).
+// Segment by sentence/word first, then by grapheme as the last resort.
+function splitSpeechText(text: string, limit = 1000): SpeechChunk[] {
+  if (!text) return [];
+  const sentences = new Intl.Segmenter(undefined, { granularity: "sentence" });
+  const words = new Intl.Segmenter(undefined, { granularity: "word" });
+  const graphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+  const output: string[] = [];
+  let current = "";
+
+  const append = (piece: string) => {
+    if (current.length + piece.length <= limit) {
+      current += piece;
+      return;
+    }
+    if (current) output.push(current);
+    current = "";
+    if (piece.length <= limit) {
+      current = piece;
+      return;
+    }
+    let fragment = "";
+    for (const item of graphemes.segment(piece)) {
+      if (fragment.length + item.segment.length > limit) {
+        if (fragment) output.push(fragment);
+        fragment = "";
+      }
+      fragment += item.segment;
+    }
+    current = fragment;
+  };
+
+  for (const sentence of sentences.segment(text)) {
+    if (current.length + sentence.segment.length <= limit) {
+      current += sentence.segment;
+      continue;
+    }
+    if (current) {
+      output.push(current);
+      current = "";
+    }
+    for (const word of words.segment(sentence.segment)) append(word.segment);
+  }
+  if (current) output.push(current);
+  return output.map((value, index) => ({ id: `chunk-${index}`, index, text: value }));
+}
+
 type ChatMessage = { role: "user" | "assistant"; content: string; id: number };
 
 type SpeechRecognitionLike = {
@@ -36,12 +85,24 @@ export default function Home() {
   const [speechReady, setSpeechReady] = useState(false);
   const [notice, setNotice] = useState("");
   const [lastHeard, setLastHeard] = useState("");
+  const [retryChunk, setRetryChunk] = useState<{
+    chunks: SpeechChunk[];
+    index: number;
+    responseId: string;
+    sessionId: number | null;
+    lang: string;
+    audioUrl?: string;
+  } | null>(null);
+  const [audioNeedsGesture, setAudioNeedsGesture] = useState(false);
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const sessionRef = useRef(false);
   const busyRef = useRef(false);
   const messagesRef = useRef<ChatMessage[]>([]);
   const sendRef = useRef<(text: string) => Promise<void>>(async () => {});
+  const voiceSessionIdRef = useRef(0);
+  const speechControllersRef = useRef(new Map<string, { controller: AbortController; sessionId: number | null }>());
+  const activeSpeechIdRef = useRef<string | null>(null);
 
   useEffect(() => { messagesRef.current = messages; }, [messages]);
   useEffect(() => { sessionRef.current = voiceSession; }, [voiceSession]);
@@ -108,28 +169,120 @@ export default function Home() {
       alive = false;
       sessionRef.current = false;
       recognitionRef.current?.abort();
+      for (const entry of speechControllersRef.current.values()) entry.controller.abort();
+      speechControllersRef.current.clear();
       audioRef.current?.pause();
     };
   }, []);
 
-  const playReply = async (text: string) => {
-    const response = await fetch("/api/speech", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text, lang: "eng" }),
-    });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error || "Speech generation failed.");
-    if (!data.audioUrl) throw new Error("Sonivox did not return an audio URL.");
+  const playAudioUrl = useCallback((url: string, signal: AbortSignal) => {
+    return new Promise<void>((resolve, reject) => {
+      const audio = audioRef.current;
+      if (!audio) return reject(new Error("Audio player is unavailable."));
+      if (signal.aborted) return reject(new DOMException("Playback cancelled", "AbortError"));
 
-    const audio = audioRef.current;
-    if (!audio) throw new Error("Audio player is unavailable.");
-    audio.src = data.audioUrl;
-    await audio.play();
-    await new Promise<void>((resolve) => {
-      audio.onended = () => resolve();
-      audio.onerror = () => resolve();
+      audio.pause();
+      audio.removeAttribute("src");
+      audio.load();
+      audio.src = url;
+
+      const cleanup = () => {
+        audio.removeEventListener("ended", onEnded);
+        audio.removeEventListener("error", onError);
+        signal.removeEventListener("abort", onAbort);
+      };
+      const onEnded = () => { cleanup(); resolve(); };
+      const onError = () => { cleanup(); reject(new Error("Audio could not be loaded or decoded.")); };
+      const onAbort = () => {
+        audio.pause();
+        cleanup();
+        reject(new DOMException("Playback cancelled", "AbortError"));
+      };
+
+      audio.addEventListener("ended", onEnded, { once: true });
+      audio.addEventListener("error", onError, { once: true });
+      signal.addEventListener("abort", onAbort, { once: true });
+      audio.play().catch((error: unknown) => { cleanup(); reject(error); });
     });
+  }, []);
+
+  const runSpeech = useCallback(async (
+    task: { chunks: SpeechChunk[]; responseId: string; sessionId: number | null; lang: string },
+    startIndex = 0,
+  ) => {
+    if (activeSpeechIdRef.current && activeSpeechIdRef.current !== task.responseId) {
+      speechControllersRef.current.get(activeSpeechIdRef.current)?.controller.abort();
+    }
+    audioRef.current?.pause();
+
+    const controller = new AbortController();
+    speechControllersRef.current.set(task.responseId, { controller, sessionId: task.sessionId });
+    activeSpeechIdRef.current = task.responseId;
+
+    for (let index = startIndex; index < task.chunks.length; index += 1) {
+      const chunk = task.chunks[index];
+      let audioUrl: string | undefined;
+      try {
+        if (controller.signal.aborted) throw new DOMException("Speech cancelled", "AbortError");
+        if (task.sessionId !== null &&
+          (!sessionRef.current || voiceSessionIdRef.current !== task.sessionId)) {
+          throw new DOMException("Voice session ended", "AbortError");
+        }
+
+        // Just-in-time generation avoids keeping signed URLs waiting in a long queue.
+        const response = await fetch("/api/speech", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: chunk.text, lang: task.lang }),
+          signal: controller.signal,
+          cache: "no-store",
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.error || `Speech request failed (HTTP ${response.status}).`);
+        if (typeof data.audioUrl !== "string" || !data.audioUrl) {
+          throw new Error("SONIVOX did not return an audio URL.");
+        }
+        audioUrl = data.audioUrl;
+        await playAudioUrl(audioUrl, controller.signal);
+        setRetryChunk(null);
+        setAudioNeedsGesture(false);
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") return;
+        const reason = error instanceof Error ? error.message : "Speech playback failed.";
+        setRetryChunk({ ...task, index, audioUrl });
+        const blocked = error instanceof DOMException && error.name === "NotAllowedError";
+        setAudioNeedsGesture(blocked);
+        setNotice(blocked
+          ? "Audio is ready, but your browser blocked automatic playback. Tap “Play / retry audio”."
+          : `AI replied, but voice chunk ${index + 1} failed: ${reason}`);
+        return;
+      }
+    }
+
+    setRetryChunk(null);
+    setAudioNeedsGesture(false);
+    if (activeSpeechIdRef.current === task.responseId) activeSpeechIdRef.current = null;
+    speechControllersRef.current.delete(task.responseId);
+  }, [playAudioUrl]);
+
+  const retryFailedSpeech = async () => {
+    const task = retryChunk;
+    if (!task) return;
+    setNotice("");
+    if (task.audioUrl) {
+      const controller = new AbortController();
+      try {
+        // Invoked directly by the user's tap for mobile autoplay compatibility.
+        await playAudioUrl(task.audioUrl, controller.signal);
+        setRetryChunk(null);
+        setAudioNeedsGesture(false);
+        await runSpeech(task, task.index + 1);
+        return;
+      } catch {
+        // The signed URL may have expired; regenerate only the failed chunk.
+      }
+    }
+    await runSpeech(task, task.index);
   };
 
   const sendMessage = useCallback(async (rawText: string) => {
@@ -141,6 +294,8 @@ export default function Home() {
     recognitionRef.current?.stop();
     setListening(false);
 
+    // Chat generation is intentionally independent of voice-session cancellation.
+    const responseSessionId = sessionRef.current ? voiceSessionIdRef.current : null;
     const userMessage: ChatMessage = { role: "user", content, id: Date.now() };
     const nextMessages = [...messagesRef.current, userMessage];
     messagesRef.current = nextMessages;
@@ -167,33 +322,49 @@ export default function Home() {
       messagesRef.current = updated;
       setMessages(updated);
 
-      try {
-        await playReply(assistantMessage.content);
-      } catch (speechError) {
-        const reason = speechError instanceof Error ? speechError.message : "Speech service failed.";
-        setNotice(`AI replied, but voice playback failed: ${reason}`);
+      // If voice ended while AI was thinking, show the text but do not start stale speech.
+      const sessionStillActive = responseSessionId === null ||
+        (sessionRef.current && voiceSessionIdRef.current === responseSessionId);
+      if (sessionStillActive) {
+        const chunks = splitSpeechText(assistantMessage.content);
+        if (chunks.length) {
+          await runSpeech({
+            chunks,
+            responseId: String(assistantMessage.id),
+            sessionId: responseSessionId,
+            lang: "eng",
+          });
+        }
       }
     } catch (error) {
-      const reason = error instanceof Error ? error.message : "Something went wrong.";
-      setNotice(reason);
+      setNotice(error instanceof Error ? error.message : "Something went wrong.");
     } finally {
       busyRef.current = false;
       setBusy(false);
       if (sessionRef.current) window.setTimeout(resumeListening, 550);
     }
-  }, [resumeListening]);
+  }, [resumeListening, runSpeech]);
 
   useEffect(() => { sendRef.current = sendMessage; }, [sendMessage]);
 
   const toggleVoice = () => {
     if (voiceSession) {
+      const endingSessionId = voiceSessionIdRef.current;
       sessionRef.current = false;
       setVoiceSession(false);
       recognitionRef.current?.stop();
+      for (const [id, entry] of speechControllersRef.current.entries()) {
+        if (entry.sessionId === endingSessionId) {
+          entry.controller.abort();
+          speechControllersRef.current.delete(id);
+        }
+      }
       audioRef.current?.pause();
+      audioRef.current?.removeAttribute("src");
+      audioRef.current?.load();
+      setRetryChunk((current) => current?.sessionId === endingSessionId ? null : current);
       setListening(false);
-      setBusy(false);
-      busyRef.current = false;
+      // Do not reset busy: pending AI text generation must finish normally.
       setStatus("Voice session ended");
       return;
     }
@@ -202,6 +373,7 @@ export default function Home() {
       return;
     }
     setNotice("");
+    voiceSessionIdRef.current += 1;
     sessionRef.current = true;
     setVoiceSession(true);
     setStatus("Voice session active · speak naturally");
@@ -215,6 +387,13 @@ export default function Home() {
   };
 
   const clearConversation = () => {
+    for (const entry of speechControllersRef.current.values()) entry.controller.abort();
+    speechControllersRef.current.clear();
+    activeSpeechIdRef.current = null;
+    audioRef.current?.pause();
+    audioRef.current?.removeAttribute("src");
+    audioRef.current?.load();
+    setRetryChunk(null);
     messagesRef.current = [];
     setMessages([]);
     setLastHeard("");
@@ -266,6 +445,11 @@ export default function Home() {
 
         {lastHeard && <div className="heard-line"><span>YOU SAID</span> “{lastHeard}”</div>}
         {notice && <div className="notice" role="status">{notice}</div>}
+        {retryChunk && (
+          <button className="audio-retry" type="button" onClick={() => void retryFailedSpeech()}>
+            {audioNeedsGesture ? "Play / retry audio" : `Retry voice from chunk ${retryChunk.index + 1}`}
+          </button>
+        )}
 
         <section className="conversation">
           <div className="conversation-head"><span>CONVERSATION</span><span>{messages.length} MESSAGES</span></div>
@@ -297,7 +481,7 @@ export default function Home() {
       </section>
 
       <footer className="footer"><span>SONIVOX LIVE CHAT TEST</span><span>MICROPHONE · AI · SPEAKER</span></footer>
-      <audio ref={audioRef} className="hidden-audio" />
+      <audio ref={audioRef} className="hidden-audio" preload="none" playsInline />
     </main>
   );
 }
