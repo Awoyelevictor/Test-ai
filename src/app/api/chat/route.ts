@@ -14,16 +14,17 @@ export async function POST(request: NextRequest) {
   catch { return NextResponse.json({ error: "Invalid request body." }, { status: 400 }); }
 
   const messages = body.messages;
-  if (!Array.isArray(messages) || messages.length === 0 || messages.length > 30) {
-    return NextResponse.json({ error: "Send between 1 and 30 messages." }, { status: 400 });
+  if (!Array.isArray(messages) || messages.length === 0 || messages.length > 60) {
+    return NextResponse.json({ error: "Send between 1 and 60 messages." }, { status: 400 });
   }
 
   const safeMessages = messages
     .filter((m) => m && (m.role === "user" || m.role === "assistant") && typeof m.content === "string")
-    .map((m) => ({ role: m.role, content: m.content.slice(0, 4000) }));
+    .slice(-12)
+    .map((m) => ({ role: m.role, content: m.content.slice(0, 1200) }));
 
-  if (safeMessages.length !== messages.length) {
-    return NextResponse.json({ error: "One or more messages have an invalid format." }, { status: 400 });
+  if (safeMessages.length === 0) {
+    return NextResponse.json({ error: "No valid conversation messages were supplied." }, { status: 400 });
   }
 
   try {
@@ -44,6 +45,7 @@ export async function POST(request: NextRequest) {
           },
           ...safeMessages
         ],
+        max_tokens: 500,
         stream: false,
       }),
       cache: "no-store",
